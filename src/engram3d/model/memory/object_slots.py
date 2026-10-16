@@ -1,8 +1,12 @@
 # =====================================================================
 # Engram3D · Phase D, Part 3b · object slots with lifecycle
 # File: src/engram3d/model/memory/object_slots.py
-# Status: UNTESTED COMPLETE IMPLEMENTATION — validate with
-#         tests/test_slots.py BEFORE training use (§6 gate).
+# v2 CHANGELOG (after first execution, JAX 0.11.0 / TPU v5e-8):
+#   FIX-1  jnp.argsort(prio, kind="stable") → jnp.argsort(prio, stable=True)
+#          (JAX 0.11 removed the `kind` argument; stable-sort semantics
+#          preserved exactly — allocation determinism (ADR-006) unchanged).
+# Status: UNTESTED (v2) — validate with tests/test_slots.py BEFORE any
+#         training use (prompt §6 gate).
 # ---------------------------------------------------------------------
 # Proposal alignment:
 #   §4.1  "Object slots carry instance ID, velocity, and lifecycle
@@ -16,15 +20,17 @@
 #          A35 observation source (GT at train / predicted at eval)
 #          is a Phase G decision — this module is source-agnostic.
 # Precondition: instance ids are unique within one update() call and
-#          unique across slots (inductive invariant; GT/simulator data
-#          guarantees this — Phase C.2 validates).
-# Determinism: stable argsort; allocation order is a pure function of
+#          unique across slots, and the number of distinct ids per call
+#          does not exceed n_slots (inductive invariant; GT/simulator
+#          data guarantees this — Phase C.2 validates).
+# Determinism: stable sort; allocation order is a pure function of
 #          (ids, existence logits) — no data-dependent control flow.
-# ======================================================================
+# =====================================================================
 from __future__ import annotations
 
 from typing import NamedTuple
 
+import jax
 import jax.numpy as jnp
 
 __all__ = ["ObjectSlotConfig", "SlotState", "SlotObservation", "init",
@@ -97,7 +103,7 @@ def update(cfg: ObjectSlotConfig, state: SlotState, t,
     matched_slot = match.any(axis=0)                         # (N,)
     prio = jnp.where(state.instance_id >= 0, state.exist_logit, cfg.empty_exist)
     prio = jnp.where(matched_slot, 1e30, prio)               # protect matched
-    order = jnp.argsort(prio, kind="stable")                 # (N,)
+    order = jnp.argsort(prio, stable=True)                   # (N,)  [v2: JAX≥0.11 API]
     tgt = jnp.where(has_match, slot_of,
                     order[jnp.clip(rank, 0, n - 1)])         # (K,) distinct
 

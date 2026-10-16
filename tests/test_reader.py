@@ -1,8 +1,17 @@
 # =====================================================================
 # Engram3D · Phase D Part 2 · frustum-reader correctness tests
 # File: tests/test_reader.py   (pytest-compatible; plain runner)
-# Status: UNTESTED COMPLETE IMPLEMENTATION — run and return output.
-# GATES all later training (prompt §6). All expectations analytic.
+# v2 CHANGELOG (after first execution, JAX 0.11.0 / TPU v5e-8):
+#   FIX-1  make_state: jnp.stack(list-of-tuples) rejected by JAX 0.11
+#          (stack now requires ndarray/scalar elements) →
+#          jnp.asarray(centers, float32). Blocked 9 tests.
+#   FIX-2  test_pose_conventions v1 asserted "R @ fwd == fwd", which
+#          only holds for the rotation axis — a bug in the TEST, not the
+#          module. Correct semantics: R (camera→world, columns = camera
+#          axes in world) maps the camera z-axis onto the world forward:
+#          R @ [0,0,1] == fwd  ⇔  Rᵀ @ fwd == [0,0,1].
+# Status: UNTESTED (v2) — run and return output. GATES all later
+# training (prompt §6). All expectations analytic.
 # =====================================================================
 from __future__ import annotations
 
@@ -45,9 +54,9 @@ def make_state(centers, exist, feat_seed=0):
         sig2_pos=jnp.ones((n, 3)), sig2_feat=jnp.ones((n, CFG_A.feat_dim)),
         e=jnp.full((n,), -1.0), tau=jnp.full((n,), -1.0))
     return st._replace(
-        c=st.c.at[:m].set(jnp.stack(centers)),
+        c=st.c.at[:m].set(jnp.asarray(centers, dtype=jnp.float32)),
         f=st.f.at[:m].set(jax.random.normal(key, (m, CFG_A.feat_dim))),
-        e=st.e.at[:m].set(jnp.asarray(exist, jnp.float32)),
+        e=st.e.at[:m].set(jnp.asarray(exist, dtype=jnp.float32)),
         tau=st.tau.at[:m].set(0.0))
 
 
@@ -56,18 +65,25 @@ def _read(st, yaw=0.0, pitch=0.0, pos=None, t=100.0):
     return read(CFG_F, CFG_A, st, pos, pose_from_yaw_pitch(pos, yaw, pitch), t)
 
 
-# R1 — pose conventions: orthonormal, det=+1, forward/right/up axes
+# R1 — pose conventions: orthonormal, det=+1, camera→world / world→camera
 def test_pose_conventions():
-    for yaw, pitch, fwd in [(0.0, 0.0, (0, 0, 1)), (jnp.pi / 2, 0.0, (1, 0, 0)),
-                            (0.0, jnp.pi / 2, (0, 1, 0))]:
+    cam_z = jnp.array([0.0, 0.0, 1.0], jnp.float32)
+    cases = [(0.0, 0.0, (0.0, 0.0, 1.0)),
+             (jnp.pi / 2, 0.0, (1.0, 0.0, 0.0)),
+             (0.0, jnp.pi / 2, (0.0, 1.0, 0.0))]
+    for yaw, pitch, fwd in cases:
         R = pose_from_yaw_pitch(Z3, yaw, pitch)
-        assert float(jnp.max(jnp.abs(R @ jnp.asarray(fwd, jnp.float32)
-                                     - jnp.asarray(fwd, jnp.float32)))) < TOL
+        fwd = jnp.asarray(fwd, jnp.float32)
+        # camera→world: R maps the camera forward axis onto world forward
+        assert float(jnp.max(jnp.abs(R @ cam_z - fwd))) < TOL
+        # world→camera: Rᵀ maps world forward back onto the camera z-axis
+        assert float(jnp.max(jnp.abs(R.T @ fwd - cam_z))) < TOL
         assert float(jnp.max(jnp.abs(R @ R.T - jnp.eye(3)))) < TOL
         assert abs(float(jnp.linalg.det(R)) - 1.0) < TOL
     R0 = pose_from_yaw_pitch(Z3, 0.0, 0.0)
-    assert float(jnp.max(jnp.abs(R0[:, 0] - jnp.array([1., 0., 0.])))) < TOL
-    assert float(jnp.max(jnp.abs(R0[:, 1] - jnp.array([0., 1., 0.])))) < TOL
+    assert float(jnp.max(jnp.abs(R0[:, 0] - jnp.array([1., 0., 0.])))) < TOL  # right
+    assert float(jnp.max(jnp.abs(R0[:, 1] - jnp.array([0., 1., 0.])))) < TOL  # up
+    assert float(jnp.max(jnp.abs(R0[:, 2] - jnp.array([0., 0., 1.])))) < TOL  # forward
 
 
 # R2 — frustum containment at origin, yaw 0, fov 90°, near .1, far 5

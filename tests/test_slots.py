@@ -1,9 +1,16 @@
 # =====================================================================
 # Engram3D · Phase D Part 3 · object-slot & episodic-buffer tests
 # File: tests/test_slots.py   (pytest-compatible; plain runner)
-# Status: UNTESTED COMPLETE IMPLEMENTATION — run and return output.
-# GATES all later training (prompt §6). All expectations analytic.
-# ======================================================================
+# v2 CHANGELOG (after first execution, JAX 0.11.0 / TPU v5e-8):
+#   FIX-1  S8 gradient test: v1 loss summed ONLY .feat, which does not
+#          depend on obs.pos → the g_op > 0 assertion could never pass.
+#          Loss now sums feat + pos + vel (all asserted gradient paths
+#          live). Latent bug found in post-failure review.
+#   (The argsort TypeError was a MODULE bug — fixed in object_slots.py
+#    v2: jnp.argsort(..., stable=True). No other test changes.)
+# Status: UNTESTED (v2) — run and return output. GATES all later
+# training (prompt §6). All expectations analytic.
+# =====================================================================
 from __future__ import annotations
 
 import os
@@ -70,7 +77,9 @@ def test_matching_updates_and_velocity():
     assert not bool(st2.is_dynamic[0])                     # stream can flip
 
 
-# S3 — velocity EMA over a second interval
+# S3 — velocity EMA over a second interval (positions are BLENDED:
+# t=10 pos becomes 0.3·2 + 0.7·3 = 2.7, so vel_obs at t=20 is
+# (5 − 2.7)/10 = 0.23, and vel = 0.8·0.04 + 0.2·0.23 = 0.078)
 def test_velocity_ema():
     st = init(CFG)
     st1 = update(CFG, st, 5.0, obs([101], [[0., 0., 0., 0.]],
@@ -145,7 +154,10 @@ def test_gradient_flow():
     def loss(state_f, state_p, obs_f, obs_p):
         stt = st1._replace(feat=state_f, pos=state_p)
         o = obs2._replace(feat=obs_f, pos=obs_p)
-        return jnp.sum(update(CFG, stt, 10.0, o).feat)
+        u = update(CFG, stt, 10.0, o)
+        # v2: sum feat + pos + vel so every asserted gradient path is live
+        # (v1 summed only .feat — obs.pos had zero gradient by construction)
+        return jnp.sum(u.feat) + jnp.sum(u.pos) + jnp.sum(u.vel)
 
     g_sf, g_sp, g_of, g_op = jax.grad(loss)(st1.feat, st1.pos,
                                             obs2.feat, obs2.pos)
@@ -171,7 +183,7 @@ def test_jit_matches_eager():
             assert float(jnp.max(jnp.abs(a - b))) < 1e-6, fld
 
 
-# E1–E3 — episodic buffer FIFO semantics + gradient
+# E1–E2 — episodic buffer FIFO semantics + gradient
 def test_buffer_fifo_and_eviction():
     cfg = eb.EpisodicBufferConfig(capacity=4, latent_dim=8)
     st = eb.init(cfg)
